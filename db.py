@@ -10,13 +10,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     phone TEXT,
     time TEXT,
     status TEXT,
-    UNIQUE(message, phone, time)
+    UNIQUE(message, phone)
 )
 """)
 
 cursor.execute("""
 CREATE UNIQUE INDEX IF NOT EXISTS unique_task
-ON tasks(message, phone, time)
+ON tasks(message, phone)
 """)
 
 def update_task_time(task_id, new_time):

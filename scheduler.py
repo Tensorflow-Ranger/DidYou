@@ -33,7 +33,7 @@ def check_tasks():
             make_call(phone, task_id)
 
             # push next retry
-            new_time = now + timedelta(minutes=30)
+            new_time = now + timedelta(minutes=1)
 
             update_task_time(task_id, new_time)
 
