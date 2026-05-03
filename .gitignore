@@ -2,3 +2,4 @@
 venv/
 tasks.db
 __pycache__/
+.env.example
