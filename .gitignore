@@ -3,3 +3,5 @@ venv/
 tasks.db
 __pycache__/
 .env.example
+.aretta-code
+.aretta.json

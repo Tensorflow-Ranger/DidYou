@@ -105,12 +105,13 @@ def check_tasks():
         attempts = task["attempts"] or 0
 
         task_time = datetime.fromisoformat(scheduled_time)
-        # Ensure task_time is IST-aware for comparison
-        if task_time.tzinfo is None:
-            task_time = task_time.replace(tzinfo=IST)
+        # Strip timezone info for comparison — all times are IST
+        if task_time.tzinfo is not None:
+            task_time = task_time.replace(tzinfo=None)
+        now_naive = now.replace(tzinfo=None)
 
         # Not yet time for this task
-        if now < task_time:
+        if now_naive < task_time:
             continue
 
         # Check if we've hit max attempts
