@@ -1,0 +1,8 @@
+# DidYou - Task Reminder Service
+# Calls you repeatedly until you complete your tasks
+
+flask>=2.3.0
+twilio>=8.0.0
+python-dotenv>=1.0.0
+APScheduler>=3.10.0
+dateparser>=1.2.0
