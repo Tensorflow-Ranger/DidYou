@@ -275,6 +275,7 @@ def parse_reminder(message_body):
     is_recurring = False
     
     # Patterns: "daily at X", "every day at X", "weekdays at X", "weekly at X", "monthly at X"
+    # Timed recurring patterns (require "at TIME")
     recurring_patterns = [
         (r'\b(daily|every\s*day)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'daily'),
         (r'\b(weekdays|every\s*weekday|mon(?:day)?[\s-]*fri(?:day)?)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'weekdays'),
@@ -282,6 +283,16 @@ def parse_reminder(message_body):
         (r'\b(monthly|every\s*month)\b(?:.*?\bon\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?)?.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'monthly'),
     ]
     
+    # All-day recurring patterns (no time required — triggers escalation)
+    # e.g. "pay rent monthly", "pay rent monthly on 1st", "clean daily", "review weekly"
+    allday_recurring_patterns = [
+        (r'\b(monthly|every\s*month)\b(?:.*?\bon\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?)?', 'monthly'),
+        (r'\b(daily|every\s*day)\b', 'daily'),
+        (r'\b(weekdays|every\s*weekday|mon(?:day)?[\s-]*fri(?:day)?)\b', 'weekdays'),
+        (r'\b(weekly|every\s*week)\b', 'weekly'),
+    ]
+    
+    # Try timed patterns first
     for pattern, rec_type in recurring_patterns:
         match = re.search(pattern, message_lower)
         if match:
@@ -368,6 +379,63 @@ def parse_reminder(message_body):
                     "recurrence_time": recurrence_time,
                     "recurrence_day": recurrence_day,
                 }
+    
+    # Try all-day recurring patterns (no time specified — escalation through the day)
+    for pattern, rec_type in allday_recurring_patterns:
+        match = re.search(pattern, message_lower)
+        if match:
+            from datetime import timedelta
+            import calendar
+            
+            if rec_type == "monthly":
+                day_str = match.group(2)  # optional day like "1", "15"
+            else:
+                day_str = None
+            
+            # Extract the task by removing the recurring keywords
+            task = re.sub(pattern, '', message_lower).strip()
+            task = re.sub(r'^(remind\s+me\s+to|reminder[:\s]+)', '', task).strip()
+            task = re.sub(r'\s+', ' ', task).strip()
+            
+            if not task:
+                continue
+            
+            now = datetime.now(IST)
+            recurrence_day = int(day_str) if day_str else now.day if rec_type == "monthly" else None
+            
+            # Schedule first occurrence at 8am (start of escalation)
+            if rec_type == "monthly":
+                year = now.year
+                month = now.month
+                last_day = calendar.monthrange(year, month)[1]
+                target_day = min(recurrence_day or now.day, last_day)
+                first_time = datetime(year, month, target_day, 8, 0, 0, tzinfo=IST)
+                if first_time <= now:
+                    month += 1
+                    if month > 12:
+                        month = 1
+                        year += 1
+                    target_day = min(recurrence_day or now.day, calendar.monthrange(year, month)[1])
+                    first_time = datetime(year, month, target_day, 8, 0, 0, tzinfo=IST)
+            elif rec_type == "weekly":
+                first_time = (now + timedelta(days=7)).replace(hour=8, minute=0, second=0, microsecond=0)
+            elif rec_type == "weekdays":
+                first_time = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+                while first_time.weekday() >= 5:
+                    first_time += timedelta(days=1)
+            else:
+                # daily
+                first_time = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+            
+            return {
+                "task": task,
+                "time": first_time,
+                "is_recurring": True,
+                "is_allday": True,
+                "recurrence_type": rec_type,
+                "recurrence_time": None,
+                "recurrence_day": recurrence_day,
+            }
     
     # Non-recurring task parsing (existing logic)
     patterns = [
@@ -496,19 +564,37 @@ def whatsapp_webhook():
         
         if body_lower in ("help", "?"):
             response.message(
-                "Send me a reminder like:\n"
-                "• remind me to drink water at 3pm\n"
-                "• call mom tomorrow at 9am\n"
-                "• buy groceries in 30 minutes\n\n"
-                "For recurring tasks:\n"
-                "• exercise daily at 7am\n"
-                "• standup weekdays at 10am\n"
-                "• review weekly at 6pm\n"
-                "• pay rent monthly at 10am\n"
-                "• pay rent monthly on 1st at 10am\n\n"
-                "All-day reminders (no time = escalates through the day):\n"
-                "• remind me to submit report\n\n"
-                "Commands: list, help"
+                "*DidYou Reminder Bot*\n\n"
+                
+                "*One-time reminders:*\n"
+                "Just say what and when:\n"
+                "• _remind me to drink water at 3pm_\n"
+                "• _call mom tomorrow at 9am_\n"
+                "• _buy groceries in 30 minutes_\n\n"
+                
+                "*Recurring reminders:*\n"
+                "Add a frequency keyword:\n"
+                "• _exercise daily at 7am_\n"
+                "• _standup weekdays at 10am_\n"
+                "• _review weekly at 6pm_\n"
+                "• _pay rent monthly at 10am_\n"
+                "• _pay rent monthly on 1st at 10am_\n\n"
+                
+                "*All-day reminders:*\n"
+                "Skip the time — I'll nudge you all day:\n"
+                "SMS at 8am, WhatsApp at noon, calls at 6pm\n"
+                "• _submit report_\n"
+                "• _clean the house_\n\n"
+                
+                "*Recurring all-day:*\n"
+                "Combine frequency + no time:\n"
+                "• _pay rent monthly on 1st_\n"
+                "• _exercise daily_\n"
+                "• _clean weekly_\n\n"
+                
+                "*Commands:*\n"
+                "• *list* — see your pending tasks\n"
+                "• *help* — show this message"
             )
             return str(response), 200, {'Content-Type': 'text/xml'}
         
