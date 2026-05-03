@@ -18,6 +18,7 @@ from db import (
     is_number_allowed, 
     log_call,
     reset_task_attempts,
+    complete_task,
 )
 
 # Configure logging
@@ -171,12 +172,21 @@ def handle_input():
         
         if task_complete:
             logger.info(f"Task {task_id} marked as complete")
-            update_task(task_id, "done")
-            response.say(
-                "Great job! Task marked as complete. Have a wonderful day!",
-                voice="Polly.Joanna-Neural"
-            )
-            log_call(task_id, "", "call", "completed_by_user")
+            is_recurring, next_time, streak = complete_task(task_id)
+            
+            if is_recurring:
+                response.say(
+                    f"Great job! That's a {streak} day streak! "
+                    f"I'll remind you again {next_time}.",
+                    voice="Polly.Joanna-Neural"
+                )
+                log_call(task_id, "", "call", f"completed_recurring_streak:{streak}")
+            else:
+                response.say(
+                    "Great job! Task marked as complete. Have a wonderful day!",
+                    voice="Polly.Joanna-Neural"
+                )
+                log_call(task_id, "", "call", "completed_by_user")
         else:
             logger.info(f"Task {task_id} snoozed")
             # User said no or snooze - reset attempts for gentler retry schedule
@@ -250,12 +260,71 @@ def parse_reminder(message_body):
       "remind me to drink water at 3pm"
       "remind me to call mom tomorrow at 9am"
       "buy groceries in 30 minutes"
+      "remind me to exercise daily at 7am"
+      "drink water every day at 9am"
+      "standup meeting weekdays at 10am"
     
-    Returns dict with 'task' and 'time' or None if parsing fails.
+    Returns dict with 'task', 'time', and optionally 'is_recurring', 'recurrence_type', 'recurrence_time'
+    or None if parsing fails.
     """
     message_lower = message_body.lower().strip()
     
-    # Patterns to match
+    # Check for recurring patterns first
+    recurrence_type = None
+    recurrence_time = None
+    is_recurring = False
+    
+    # Patterns: "daily at X", "every day at X", "weekdays at X", "weekly at X"
+    recurring_patterns = [
+        (r'\b(daily|every\s*day)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'daily'),
+        (r'\b(weekdays|every\s*weekday|mon(?:day)?[\s-]*fri(?:day)?)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'weekdays'),
+        (r'\b(weekly|every\s*week)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'weekly'),
+    ]
+    
+    for pattern, rec_type in recurring_patterns:
+        match = re.search(pattern, message_lower)
+        if match:
+            is_recurring = True
+            recurrence_type = rec_type
+            time_str = match.group(2)
+            
+            # Parse the time to get HH:MM format
+            parsed = dateparser.parse(
+                f"today at {time_str}",
+                settings={'TIMEZONE': DEFAULT_TIMEZONE, 'RETURN_AS_TIMEZONE_AWARE': True}
+            )
+            if parsed:
+                recurrence_time = parsed.strftime("%H:%M")
+            
+            # Extract the task by removing the recurring keywords and time
+            task = re.sub(pattern, '', message_lower).strip()
+            task = re.sub(r'^(remind\s+me\s+to|reminder[:\s]+)', '', task).strip()
+            task = re.sub(r'\s+', ' ', task).strip()  # Clean up whitespace
+            
+            if task:
+                # For recurring tasks, first occurrence is today (if time hasn't passed) or tomorrow
+                now = datetime.now(IST)
+                if parsed and parsed > now:
+                    first_time = parsed
+                else:
+                    # Schedule for tomorrow
+                    from datetime import timedelta
+                    tomorrow = now + timedelta(days=1)
+                    if recurrence_time:
+                        hour, minute = map(int, recurrence_time.split(":"))
+                    else:
+                        hour, minute = 9, 0  # Default to 9 AM
+                    first_time = tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                
+                return {
+                    "task": task,
+                    "time": first_time,
+                    "is_recurring": True,
+                    "recurrence_type": recurrence_type,
+                    "recurrence_time": recurrence_time,
+                }
+    
+    # Non-recurring task parsing (existing logic)
     patterns = [
         # "remind me to X at/in/on Y"
         r"remind(?:\s+me)?\s+to\s+(.+?)\s+(at|in|on|by|tomorrow|next\s+\w+)\s*(.+)?",
@@ -314,7 +383,7 @@ def parse_reminder(message_body):
     if parsed_time.tzinfo is None:
         parsed_time = parsed_time.replace(tzinfo=IST)
     
-    return {"task": task, "time": parsed_time}
+    return {"task": task, "time": parsed_time, "is_recurring": False}
 
 
 @app.route("/whatsapp", methods=["POST"])
@@ -351,7 +420,11 @@ def whatsapp_webhook():
                 "• remind me to drink water at 3pm\n"
                 "• call mom tomorrow at 9am\n"
                 "• buy groceries in 30 minutes\n\n"
-                "I'll call you until you confirm it's done!"
+                "For recurring tasks:\n"
+                "• exercise daily at 7am\n"
+                "• standup weekdays at 10am\n"
+                "• review weekly at 6pm\n\n"
+                "Commands: list, help"
             )
             return str(response), 200, {'Content-Type': 'text/xml'}
         
@@ -378,15 +451,20 @@ def whatsapp_webhook():
         if parsed is None:
             response.message(
                 "I couldn't understand that. Try something like:\n"
-                "remind me to drink water at 3pm"
+                "remind me to drink water at 3pm\n"
+                "exercise daily at 7am"
             )
             return str(response), 200, {'Content-Type': 'text/xml'}
         
         # Create the task
+        is_recurring = parsed.get("is_recurring", False)
         task_id = add_task(
             message=parsed["task"],
             phone=phone,
-            time=parsed["time"].isoformat()
+            time=parsed["time"].isoformat(),
+            is_recurring=is_recurring,
+            recurrence_type=parsed.get("recurrence_type"),
+            recurrence_time=parsed.get("recurrence_time"),
         )
         
         if task_id is None:
@@ -397,11 +475,19 @@ def whatsapp_webhook():
             )
         else:
             time_str = parsed["time"].strftime("%b %d at %I:%M %p")
-            logger.info(f"Created task {task_id}: '{parsed['task']}' for {time_str}")
-            response.message(
-                f"Got it! I'll remind you to '{parsed['task']}' on {time_str}. "
-                "I'll keep calling until you confirm it's done!"
-            )
+            if is_recurring:
+                rec_type = parsed.get("recurrence_type", "daily")
+                logger.info(f"Created recurring task {task_id}: '{parsed['task']}' {rec_type} at {parsed.get('recurrence_time')}")
+                response.message(
+                    f"Got it! I'll remind you to '{parsed['task']}' {rec_type} starting {time_str}. "
+                    "I'll track your streak!"
+                )
+            else:
+                logger.info(f"Created task {task_id}: '{parsed['task']}' for {time_str}")
+                response.message(
+                    f"Got it! I'll remind you to '{parsed['task']}' on {time_str}. "
+                    "I'll keep calling until you confirm it's done!"
+                )
             log_call(task_id, phone, "whatsapp", "task_created")
         
         return str(response), 200, {'Content-Type': 'text/xml'}

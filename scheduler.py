@@ -19,6 +19,7 @@ scheduler = BackgroundScheduler()
 MAX_DAILY_CALLS_DEFAULT = int(os.getenv("MAX_DAILY_CALLS", "5"))
 MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "20"))  # Stop after this many total attempts
 DEFAULT_TIMEZONE = "Asia/Kolkata"  # IST
+IST = ZoneInfo(DEFAULT_TIMEZONE)
 
 # Expanding interval schedule (in minutes)
 # Based on cognitive science: expanding intervals are 2x more effective than fixed
@@ -94,7 +95,7 @@ def check_tasks():
     - Jitter (prevents predictable patterns)
     """
     tasks = get_pending_tasks()
-    now = datetime.now()
+    now = datetime.now(IST)
 
     for task in tasks:
         task_id = task["id"]
@@ -104,6 +105,9 @@ def check_tasks():
         attempts = task["attempts"] or 0
 
         task_time = datetime.fromisoformat(scheduled_time)
+        # Ensure task_time is IST-aware for comparison
+        if task_time.tzinfo is None:
+            task_time = task_time.replace(tzinfo=IST)
 
         # Not yet time for this task
         if now < task_time:

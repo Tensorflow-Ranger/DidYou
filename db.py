@@ -1,6 +1,9 @@
 import sqlite3
 import os
 from datetime import datetime
+from zoneinfo import ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
 
 DB_PATH = os.getenv("DB_PATH", "tasks.db")
 
@@ -12,7 +15,7 @@ cursor = conn.cursor()
 cursor.execute("PRAGMA journal_mode=WAL")
 cursor.execute("PRAGMA busy_timeout=5000")
 
-# Tasks table with new columns for smart escalation
+# Tasks table with new columns for smart escalation and recurrence
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,6 +27,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     daily_calls INTEGER DEFAULT 0,
     last_call_date TEXT,
     created_at TEXT DEFAULT (datetime('now')),
+    -- Recurrence fields
+    is_recurring INTEGER DEFAULT 0,
+    recurrence_type TEXT,
+    recurrence_time TEXT,
+    streak INTEGER DEFAULT 0,
     UNIQUE(message, phone)
 )
 """)
@@ -46,6 +54,27 @@ except sqlite3.OperationalError:
 
 try:
     cursor.execute("ALTER TABLE tasks ADD COLUMN created_at TEXT DEFAULT (datetime('now'))")
+except sqlite3.OperationalError:
+    pass
+
+# Recurrence columns migration
+try:
+    cursor.execute("ALTER TABLE tasks ADD COLUMN is_recurring INTEGER DEFAULT 0")
+except sqlite3.OperationalError:
+    pass
+
+try:
+    cursor.execute("ALTER TABLE tasks ADD COLUMN recurrence_type TEXT")
+except sqlite3.OperationalError:
+    pass
+
+try:
+    cursor.execute("ALTER TABLE tasks ADD COLUMN recurrence_time TEXT")
+except sqlite3.OperationalError:
+    pass
+
+try:
+    cursor.execute("ALTER TABLE tasks ADD COLUMN streak INTEGER DEFAULT 0")
 except sqlite3.OperationalError:
     pass
 
@@ -80,12 +109,24 @@ CREATE TABLE IF NOT EXISTS call_log (
 conn.commit()
 
 
-def add_task(message, phone, time):
-    """Add a new task. Returns task ID or None if duplicate."""
+def add_task(message, phone, time, is_recurring=False, recurrence_type=None, recurrence_time=None):
+    """
+    Add a new task. Returns task ID or None if duplicate.
+    
+    Args:
+        message: Task description
+        phone: Phone number (E.164 format)
+        time: ISO format datetime string for next reminder
+        is_recurring: Whether this task repeats
+        recurrence_type: 'daily', 'weekdays', 'weekly', or None
+        recurrence_time: Time of day for recurring tasks (HH:MM format in IST)
+    """
     try:
         cursor.execute(
-            "INSERT INTO tasks (message, phone, time, status, attempts) VALUES (?, ?, ?, ?, ?)",
-            (message, phone, time, "pending", 0)
+            """INSERT INTO tasks 
+               (message, phone, time, status, attempts, is_recurring, recurrence_type, recurrence_time, streak) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (message, phone, time, "pending", 0, 1 if is_recurring else 0, recurrence_type, recurrence_time, 0)
         )
         conn.commit()
         return cursor.lastrowid
@@ -122,7 +163,7 @@ def update_task_time(task_id, new_time):
 
 def increment_task_attempts(task_id):
     """Increment attempt counter and daily call counter. Returns new attempt count."""
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(IST).strftime("%Y-%m-%d")
     
     task = get_task(task_id)
     if task is None:
@@ -147,7 +188,7 @@ def increment_task_attempts(task_id):
 
 def get_task_daily_calls(task_id):
     """Get the number of calls made today for a task."""
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(IST).strftime("%Y-%m-%d")
     task = get_task(task_id)
     if task is None:
         return 0
@@ -160,6 +201,75 @@ def reset_task_attempts(task_id):
     """Reset attempt counter (e.g., when user snoozes)."""
     cursor.execute("UPDATE tasks SET attempts=0 WHERE id=?", (task_id,))
     conn.commit()
+
+
+def complete_task(task_id):
+    """
+    Complete a task. For recurring tasks, reschedules to next occurrence.
+    For one-time tasks, marks as done.
+    Returns: (is_recurring, next_time_str or None, new_streak or None)
+    """
+    from datetime import timedelta
+    
+    task = get_task(task_id)
+    if task is None:
+        return (False, None, None)
+    
+    is_recurring = task["is_recurring"]
+    
+    if not is_recurring:
+        # One-time task: mark as done
+        cursor.execute("UPDATE tasks SET status='done' WHERE id=?", (task_id,))
+        conn.commit()
+        return (False, None, None)
+    
+    # Recurring task: increment streak and reschedule
+    recurrence_type = task["recurrence_type"]
+    recurrence_time = task["recurrence_time"] or "09:00"
+    current_streak = (task["streak"] or 0) + 1
+    
+    # Calculate next occurrence
+    now = datetime.now(IST)
+    hour, minute = map(int, recurrence_time.split(":"))
+    
+    if recurrence_type == "daily":
+        # Tomorrow at the same time
+        next_date = now.date() + timedelta(days=1)
+    elif recurrence_type == "weekdays":
+        # Next weekday (Mon-Fri)
+        next_date = now.date() + timedelta(days=1)
+        while next_date.weekday() >= 5:  # 5=Saturday, 6=Sunday
+            next_date += timedelta(days=1)
+    elif recurrence_type == "weekly":
+        # Same day next week
+        next_date = now.date() + timedelta(days=7)
+    else:
+        # Default to daily
+        next_date = now.date() + timedelta(days=1)
+    
+    next_time = datetime(
+        next_date.year, next_date.month, next_date.day,
+        hour, minute, 0, tzinfo=IST
+    )
+    
+    # Update task: reset attempts, increment streak, set new time, keep pending
+    cursor.execute(
+        """UPDATE tasks 
+           SET time=?, status='pending', attempts=0, daily_calls=0, streak=?
+           WHERE id=?""",
+        (next_time.isoformat(), current_streak, task_id)
+    )
+    conn.commit()
+    
+    return (True, next_time.strftime("%b %d at %I:%M %p"), current_streak)
+
+
+def get_streak(task_id):
+    """Get the current streak for a task."""
+    task = get_task(task_id)
+    if task is None:
+        return 0
+    return task["streak"] or 0
 
 
 # Allowed numbers management
@@ -207,7 +317,7 @@ def log_call(task_id, phone, channel, status=None, twilio_sid=None):
 
 def get_calls_today(phone):
     """Get number of calls made to a phone number today."""
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now(IST).strftime("%Y-%m-%d")
     cursor.execute(
         "SELECT COUNT(*) FROM call_log WHERE phone=? AND channel='call' AND created_at LIKE ?",
         (phone, f"{today}%")
