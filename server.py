@@ -439,8 +439,13 @@ def parse_reminder(message_body):
     
     # Non-recurring task parsing (existing logic)
     patterns = [
+        # "remind me to X on DATE at TIME" — specific date
+        r"remind(?:\s+me)?\s+to\s+(.+?)\s+on\s+(.+?\s+at\s+.+)",
+        # "X on DATE at TIME" — specific date without remind me
+        r"(.+?)\s+on\s+((?:the\s+)?\d{1,2}(?:st|nd|rd|th)?(?:\s+\w+)?\s+at\s+.+)",
+        r"(.+?)\s+on\s+(\w+\s+\d{1,2}(?:st|nd|rd|th)?\s+at\s+.+)",
         # "remind me to X at/in/on Y"
-        r"remind(?:\s+me)?\s+to\s+(.+?)\s+(at|in|on|by|tomorrow|next\s+\w+)\s*(.+)?",
+        r"remind(?:\s+me)?\s+to\s+(.+?)\s+(at|in|by|tomorrow|next\s+\w+)\s*(.+)?",
         # "X at/in Y" (simpler)
         r"(.+?)\s+(at|in)\s+(.+)",
         # "X tomorrow"
@@ -567,13 +572,13 @@ def whatsapp_webhook():
                 "*DidYou Reminder Bot*\n\n"
                 
                 "*One-time reminders:*\n"
-                "Just say what and when:\n"
                 "• _remind me to drink water at 3pm_\n"
                 "• _call mom tomorrow at 9am_\n"
-                "• _buy groceries in 30 minutes_\n\n"
+                "• _buy groceries in 30 minutes_\n"
+                "• _pay rent on May 15th at 10am_\n"
+                "• _doctor on the 25th at 2pm_\n\n"
                 
                 "*Recurring reminders:*\n"
-                "Add a frequency keyword:\n"
                 "• _exercise daily at 7am_\n"
                 "• _standup weekdays at 10am_\n"
                 "• _review weekly at 6pm_\n"
@@ -581,22 +586,16 @@ def whatsapp_webhook():
                 "• _pay rent monthly on 1st at 10am_\n\n"
                 
                 "*All-day reminders:*\n"
-                "Skip the time — I'll nudge you all day:\n"
-                "SMS at 8am, WhatsApp at noon, calls at 6pm\n"
+                "No time = SMS 8am, WhatsApp noon, calls 6pm\n"
                 "• _submit report_\n"
-                "• _clean the house_\n\n"
-                
-                "*Recurring all-day:*\n"
-                "Combine frequency + no time:\n"
-                "• _pay rent monthly on 1st_\n"
                 "• _exercise daily_\n"
-                "• _clean weekly_\n\n"
+                "• _pay rent monthly on 1st_\n\n"
                 
                 "*Commands:*\n"
-                "• *list* — see your pending tasks\n"
-                "• *clear 123* — clear task by ID\n"
-                "• *clear all* — clear all your tasks\n"
-                "• *help* — show this message"
+                "• *list* — see pending tasks\n"
+                "• *clear 123* — clear by ID\n"
+                "• *clear all* — clear all tasks\n"
+                "• *help* — show this"
             )
             return str(response), 200, {'Content-Type': 'text/xml'}
         
