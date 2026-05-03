@@ -409,3 +409,34 @@ def get_calls_today(phone):
     )
     result = cursor.fetchone()
     return result[0] if result else 0
+
+
+def clear_task(task_id, phone):
+    """
+    Clear (cancel) a specific task. Only clears if task belongs to the phone number.
+    Returns True if cleared, False if not found or unauthorized.
+    """
+    task = get_task(task_id)
+    if task is None or task["phone"] != phone:
+        return False
+    cursor.execute("UPDATE tasks SET status='cancelled' WHERE id=?", (task_id,))
+    conn.commit()
+    return True
+
+
+def clear_all_tasks(phone):
+    """
+    Clear all pending tasks for a phone number.
+    Returns the count of cleared tasks.
+    """
+    cursor.execute(
+        "SELECT COUNT(*) FROM tasks WHERE phone=? AND status='pending'",
+        (phone,)
+    )
+    count = cursor.fetchone()[0]
+    cursor.execute(
+        "UPDATE tasks SET status='cancelled' WHERE phone=? AND status='pending'",
+        (phone,)
+    )
+    conn.commit()
+    return count

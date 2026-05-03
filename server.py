@@ -594,6 +594,8 @@ def whatsapp_webhook():
                 
                 "*Commands:*\n"
                 "• *list* — see your pending tasks\n"
+                "• *clear 123* — clear task by ID\n"
+                "• *clear all* — clear all your tasks\n"
                 "• *help* — show this message"
             )
             return str(response), 200, {'Content-Type': 'text/xml'}
@@ -607,11 +609,33 @@ def whatsapp_webhook():
                 response.message("You have no pending tasks.")
             else:
                 task_list = "\n".join([
-                    f"• {t['message']} (due {t['time'][:16]})"
+                    f"• [{t['id']}] {t['message']} (due {t['time'][:16]})"
                     for t in user_tasks[:10]  # Limit to 10
                 ])
-                response.message(f"Your pending tasks:\n{task_list}")
+                response.message(f"Your pending tasks:\n{task_list}\n\nTo clear: _clear 123_ or _clear all_")
             
+            return str(response), 200, {'Content-Type': 'text/xml'}
+        
+        # Handle clear commands
+        if body_lower == "clear all":
+            from db import clear_all_tasks
+            count = clear_all_tasks(phone)
+            if count > 0:
+                response.message(f"Cleared {count} task{'s' if count != 1 else ''}.")
+                logger.info(f"Cleared all {count} tasks for {phone}")
+            else:
+                response.message("You have no pending tasks to clear.")
+            return str(response), 200, {'Content-Type': 'text/xml'}
+        
+        clear_match = re.match(r'^clear\s+(\d+)$', body_lower)
+        if clear_match:
+            from db import clear_task
+            task_id = int(clear_match.group(1))
+            if clear_task(task_id, phone):
+                response.message(f"Task {task_id} cleared.")
+                logger.info(f"Cleared task {task_id} for {phone}")
+            else:
+                response.message(f"Task {task_id} not found or doesn't belong to you.")
             return str(response), 200, {'Content-Type': 'text/xml'}
         
         # Parse as a new task
