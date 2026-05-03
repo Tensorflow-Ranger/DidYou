@@ -31,7 +31,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     is_recurring INTEGER DEFAULT 0,
     recurrence_type TEXT,
     recurrence_time TEXT,
+    recurrence_day INTEGER,
     streak INTEGER DEFAULT 0,
+    -- All-day task escalation
+    is_allday INTEGER DEFAULT 0,
+    escalation_stage TEXT DEFAULT 'sms',
     UNIQUE(message, phone)
 )
 """)
@@ -78,6 +82,23 @@ try:
 except sqlite3.OperationalError:
     pass
 
+# Monthly recurrence day
+try:
+    cursor.execute("ALTER TABLE tasks ADD COLUMN recurrence_day INTEGER")
+except sqlite3.OperationalError:
+    pass
+
+# All-day task fields
+try:
+    cursor.execute("ALTER TABLE tasks ADD COLUMN is_allday INTEGER DEFAULT 0")
+except sqlite3.OperationalError:
+    pass
+
+try:
+    cursor.execute("ALTER TABLE tasks ADD COLUMN escalation_stage TEXT DEFAULT 'sms'")
+except sqlite3.OperationalError:
+    pass
+
 # Allowed phone numbers for WhatsApp task creation
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS allowed_numbers (
@@ -109,7 +130,7 @@ CREATE TABLE IF NOT EXISTS call_log (
 conn.commit()
 
 
-def add_task(message, phone, time, is_recurring=False, recurrence_type=None, recurrence_time=None):
+def add_task(message, phone, time, is_recurring=False, recurrence_type=None, recurrence_time=None, recurrence_day=None, is_allday=False):
     """
     Add a new task. Returns task ID or None if duplicate.
     
@@ -118,15 +139,18 @@ def add_task(message, phone, time, is_recurring=False, recurrence_type=None, rec
         phone: Phone number (E.164 format)
         time: ISO format datetime string for next reminder
         is_recurring: Whether this task repeats
-        recurrence_type: 'daily', 'weekdays', 'weekly', or None
-        recurrence_time: Time of day for recurring tasks (HH:MM format in IST)
+        recurrence_type: 'daily', 'weekdays', 'weekly', 'monthly', or None
+        recurrence_time: Time of day for recurring tasks (HH:MM format in IST), None for all-day
+        recurrence_day: Day of month for monthly tasks (1-31)
+        is_allday: If True, task has no specific time - escalates through SMS->WhatsApp->Call
     """
+    escalation_stage = 'sms' if is_allday else None
     try:
         cursor.execute(
             """INSERT INTO tasks 
-               (message, phone, time, status, attempts, is_recurring, recurrence_type, recurrence_time, streak) 
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (message, phone, time, "pending", 0, 1 if is_recurring else 0, recurrence_type, recurrence_time, 0)
+               (message, phone, time, status, attempts, is_recurring, recurrence_type, recurrence_time, recurrence_day, streak, is_allday, escalation_stage) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (message, phone, time, "pending", 0, 1 if is_recurring else 0, recurrence_type, recurrence_time, recurrence_day, 0, 1 if is_allday else 0, escalation_stage)
         )
         conn.commit()
         return cursor.lastrowid
@@ -210,12 +234,14 @@ def complete_task(task_id):
     Returns: (is_recurring, next_time_str or None, new_streak or None)
     """
     from datetime import timedelta
+    import calendar
     
     task = get_task(task_id)
     if task is None:
         return (False, None, None)
     
     is_recurring = task["is_recurring"]
+    is_allday = task["is_allday"]
     
     if not is_recurring:
         # One-time task: mark as done
@@ -226,25 +252,38 @@ def complete_task(task_id):
     # Recurring task: increment streak and reschedule
     recurrence_type = task["recurrence_type"]
     recurrence_time = task["recurrence_time"] or "09:00"
+    recurrence_day = task["recurrence_day"]  # For monthly
     current_streak = (task["streak"] or 0) + 1
     
     # Calculate next occurrence
     now = datetime.now(IST)
-    hour, minute = map(int, recurrence_time.split(":"))
+    
+    if is_allday:
+        hour, minute = 8, 0  # All-day tasks start at 8 AM
+    else:
+        hour, minute = map(int, recurrence_time.split(":"))
     
     if recurrence_type == "daily":
-        # Tomorrow at the same time
         next_date = now.date() + timedelta(days=1)
     elif recurrence_type == "weekdays":
-        # Next weekday (Mon-Fri)
         next_date = now.date() + timedelta(days=1)
-        while next_date.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        while next_date.weekday() >= 5:
             next_date += timedelta(days=1)
     elif recurrence_type == "weekly":
-        # Same day next week
         next_date = now.date() + timedelta(days=7)
+    elif recurrence_type == "monthly":
+        # Same day next month
+        year = now.year
+        month = now.month + 1
+        if month > 12:
+            month = 1
+            year += 1
+        # Handle months with fewer days
+        day = recurrence_day or now.day
+        last_day = calendar.monthrange(year, month)[1]
+        day = min(day, last_day)
+        next_date = datetime(year, month, day).date()
     else:
-        # Default to daily
         next_date = now.date() + timedelta(days=1)
     
     next_time = datetime(
@@ -252,12 +291,14 @@ def complete_task(task_id):
         hour, minute, 0, tzinfo=IST
     )
     
-    # Update task: reset attempts, increment streak, set new time, keep pending
+    # Reset escalation stage for all-day tasks
+    escalation_stage = 'sms' if is_allday else None
+    
     cursor.execute(
         """UPDATE tasks 
-           SET time=?, status='pending', attempts=0, daily_calls=0, streak=?
+           SET time=?, status='pending', attempts=0, daily_calls=0, streak=?, escalation_stage=?
            WHERE id=?""",
-        (next_time.isoformat(), current_streak, task_id)
+        (next_time.isoformat(), current_streak, escalation_stage, task_id)
     )
     conn.commit()
     
@@ -270,6 +311,50 @@ def get_streak(task_id):
     if task is None:
         return 0
     return task["streak"] or 0
+
+
+def get_escalation_stage(task_id):
+    """Get current escalation stage for an all-day task."""
+    task = get_task(task_id)
+    if task is None:
+        return None
+    return task["escalation_stage"]
+
+
+def advance_escalation(task_id):
+    """
+    Advance to next escalation stage: sms -> whatsapp -> call.
+    Returns the new stage, or None if already at call.
+    """
+    task = get_task(task_id)
+    if task is None:
+        return None
+    
+    current = task["escalation_stage"]
+    stages = ['sms', 'whatsapp', 'call']
+    
+    if current not in stages:
+        current = 'sms'
+    
+    current_idx = stages.index(current)
+    if current_idx >= len(stages) - 1:
+        return 'call'  # Already at final stage
+    
+    new_stage = stages[current_idx + 1]
+    cursor.execute("UPDATE tasks SET escalation_stage=? WHERE id=?", (new_stage, task_id))
+    conn.commit()
+    return new_stage
+
+
+def get_allday_tasks_for_escalation():
+    """Get all-day tasks that are pending and due today."""
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    cursor.execute(
+        """SELECT * FROM tasks 
+           WHERE status='pending' AND is_allday=1 AND time LIKE ?""",
+        (f"{today}%",)
+    )
+    return cursor.fetchall()
 
 
 # Allowed numbers management

@@ -1,5 +1,5 @@
 from apscheduler.schedulers.background import BackgroundScheduler
-from caller import make_call
+from caller import make_call, send_sms, send_whatsapp
 from db import (
     get_pending_tasks, 
     update_task_time, 
@@ -7,6 +7,8 @@ from db import (
     get_task_daily_calls,
     get_allowed_number,
     log_call,
+    get_escalation_stage,
+    advance_escalation,
 )
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -17,13 +19,20 @@ scheduler = BackgroundScheduler()
 
 # Configuration
 MAX_DAILY_CALLS_DEFAULT = int(os.getenv("MAX_DAILY_CALLS", "5"))
-MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "20"))  # Stop after this many total attempts
+MAX_ATTEMPTS = int(os.getenv("MAX_ATTEMPTS", "20"))
 DEFAULT_TIMEZONE = "Asia/Kolkata"  # IST
 IST = ZoneInfo(DEFAULT_TIMEZONE)
 
 # Expanding interval schedule (in minutes)
-# Based on cognitive science: expanding intervals are 2x more effective than fixed
-INTERVAL_SCHEDULE = [1, 5, 15, 30, 60, 120, 240]  # 1min, 5min, 15min, 30min, 1hr, 2hr, 4hr
+INTERVAL_SCHEDULE = [1, 5, 15, 30, 60, 120, 240]
+
+# All-day task escalation schedule (hours after first notification)
+# SMS at 8am, WhatsApp at 12pm, Call at 6pm
+ALLDAY_ESCALATION_HOURS = {
+    'sms': 8,       # 8 AM
+    'whatsapp': 12, # 12 PM (noon)  
+    'call': 18,     # 6 PM
+}
 
 
 def get_next_interval(attempts):
@@ -93,9 +102,11 @@ def check_tasks():
     - Quiet hours (legal compliance)
     - Daily call caps (cost/annoyance limit)
     - Jitter (prevents predictable patterns)
+    - All-day task escalation: SMS -> WhatsApp -> Call
     """
     tasks = get_pending_tasks()
     now = datetime.now(IST)
+    current_hour = now.hour
 
     for task in tasks:
         task_id = task["id"]
@@ -103,6 +114,7 @@ def check_tasks():
         phone = task["phone"]
         scheduled_time = task["time"]
         attempts = task["attempts"] or 0
+        is_allday = task["is_allday"]
 
         task_time = datetime.fromisoformat(scheduled_time)
         # Strip timezone info for comparison — all times are IST
@@ -114,6 +126,13 @@ def check_tasks():
         if now_naive < task_time:
             continue
 
+        # Handle all-day tasks with escalation
+        if is_allday:
+            handle_allday_task(task, now, current_hour)
+            continue
+
+        # Regular task handling below...
+        
         # Check if we've hit max attempts
         if attempts >= MAX_ATTEMPTS:
             print(f"Task {task_id} hit max attempts ({MAX_ATTEMPTS}), skipping")
@@ -121,11 +140,9 @@ def check_tasks():
 
         # Check quiet hours
         if is_quiet_hours(phone):
-            # Reschedule to end of quiet hours
             user = get_allowed_number(phone)
             quiet_end = user["quiet_end"] if user else "08:00"
             
-            # Parse quiet_end and create next available time
             hour, minute = map(int, quiet_end.split(":"))
             next_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
             if next_time <= now:
@@ -139,7 +156,6 @@ def check_tasks():
         daily_calls = get_task_daily_calls(task_id)
         max_calls = get_max_daily_calls(phone)
         if daily_calls >= max_calls:
-            # Reschedule to tomorrow
             tomorrow = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
             update_task_time(task_id, tomorrow)
             print(f"Task {task_id} delayed to tomorrow (daily cap of {max_calls} reached)")
@@ -149,10 +165,8 @@ def check_tasks():
         call_sid = make_call(phone, task_id, message)
         
         if call_sid:
-            # Log the call
             log_call(task_id, phone, "call", "initiated", call_sid)
             
-            # Increment attempts and schedule next retry with expanding interval
             new_attempts = increment_task_attempts(task_id)
             next_interval = get_next_interval(new_attempts)
             new_time = now + timedelta(minutes=next_interval)
@@ -160,10 +174,96 @@ def check_tasks():
             
             print(f"Task {task_id}: Call initiated (attempt {new_attempts}), next retry in {next_interval:.1f} min")
         else:
-            # Call failed to initiate, retry sooner
             new_time = now + timedelta(minutes=1)
             update_task_time(task_id, new_time)
             print(f"Task {task_id}: Call failed to initiate, retrying in 1 min")
+
+
+def handle_allday_task(task, now, current_hour):
+    """
+    Handle all-day tasks with SMS -> WhatsApp -> Call escalation.
+    - 8 AM: Send SMS
+    - 12 PM: Send WhatsApp
+    - 6 PM: Start calling
+    """
+    task_id = task["id"]
+    message = task["message"]
+    phone = task["phone"]
+    stage = task["escalation_stage"] or 'sms'
+    attempts = task["attempts"] or 0
+    
+    reminder_msg = f"Reminder: {message}. Reply DONE when completed."
+    
+    # Determine what action to take based on current hour and stage
+    if stage == 'sms' and current_hour >= ALLDAY_ESCALATION_HOURS['sms']:
+        # Send SMS
+        sid = send_sms(phone, reminder_msg)
+        if sid:
+            log_call(task_id, phone, "sms", "sent", sid)
+            print(f"Task {task_id}: SMS sent")
+        
+        # Advance to next stage for later
+        advance_escalation(task_id)
+        
+        # Schedule next check for WhatsApp time
+        next_time = now.replace(hour=ALLDAY_ESCALATION_HOURS['whatsapp'], minute=0, second=0, microsecond=0)
+        if next_time <= now:
+            next_time += timedelta(days=1)
+        update_task_time(task_id, next_time)
+        
+    elif stage == 'whatsapp' and current_hour >= ALLDAY_ESCALATION_HOURS['whatsapp']:
+        # Send WhatsApp
+        sid = send_whatsapp(phone, reminder_msg)
+        if sid:
+            log_call(task_id, phone, "whatsapp", "sent", sid)
+            print(f"Task {task_id}: WhatsApp sent")
+        
+        # Advance to call stage
+        advance_escalation(task_id)
+        
+        # Schedule next check for call time
+        next_time = now.replace(hour=ALLDAY_ESCALATION_HOURS['call'], minute=0, second=0, microsecond=0)
+        if next_time <= now:
+            next_time += timedelta(days=1)
+        update_task_time(task_id, next_time)
+        
+    elif stage == 'call' and current_hour >= ALLDAY_ESCALATION_HOURS['call']:
+        # Now we call (use regular call logic with expanding intervals)
+        if attempts >= MAX_ATTEMPTS:
+            print(f"Task {task_id} hit max attempts, skipping")
+            return
+        
+        if is_quiet_hours(phone):
+            user = get_allowed_number(phone)
+            quiet_end = user["quiet_end"] if user else "08:00"
+            hour, minute = map(int, quiet_end.split(":"))
+            next_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            if next_time <= now:
+                next_time += timedelta(days=1)
+            update_task_time(task_id, next_time)
+            print(f"Task {task_id} delayed (quiet hours)")
+            return
+        
+        daily_calls = get_task_daily_calls(task_id)
+        max_calls = get_max_daily_calls(phone)
+        if daily_calls >= max_calls:
+            tomorrow = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+            update_task_time(task_id, tomorrow)
+            print(f"Task {task_id} delayed to tomorrow (daily cap)")
+            return
+        
+        call_sid = make_call(phone, task_id, message)
+        if call_sid:
+            log_call(task_id, phone, "call", "initiated", call_sid)
+            new_attempts = increment_task_attempts(task_id)
+            next_interval = get_next_interval(new_attempts)
+            new_time = now + timedelta(minutes=next_interval)
+            update_task_time(task_id, new_time)
+            print(f"Task {task_id}: Call initiated (attempt {new_attempts})")
+        else:
+            new_time = now + timedelta(minutes=1)
+            update_task_time(task_id, new_time)
+            print(f"Task {task_id}: Call failed, retrying")
 
 
 # Run every 30 seconds

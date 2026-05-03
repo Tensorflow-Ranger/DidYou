@@ -274,11 +274,12 @@ def parse_reminder(message_body):
     recurrence_time = None
     is_recurring = False
     
-    # Patterns: "daily at X", "every day at X", "weekdays at X", "weekly at X"
+    # Patterns: "daily at X", "every day at X", "weekdays at X", "weekly at X", "monthly at X"
     recurring_patterns = [
         (r'\b(daily|every\s*day)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'daily'),
         (r'\b(weekdays|every\s*weekday|mon(?:day)?[\s-]*fri(?:day)?)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'weekdays'),
         (r'\b(weekly|every\s*week)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'weekly'),
+        (r'\b(monthly|every\s*month)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'monthly'),
     ]
     
     for pattern, rec_type in recurring_patterns:
@@ -364,6 +365,41 @@ def parse_reminder(message_body):
     if not task:
         return None
     
+    # Check if this is an all-day task (no time specified)
+    # All-day if no time-like patterns found in original message
+    time_indicators = [
+        r'\bat\s+\d',          # "at 3pm", "at 15:00"
+        r'\bin\s+\d+\s+\w+',   # "in 30 minutes"
+        r'\b\d{1,2}:\d{2}',    # "15:00", "3:30"
+        r'\b\d{1,2}\s*(?:am|pm)\b',  # "3pm", "3 pm"
+        r'\btomorrow\b',       # implies a specific time context
+        r'\btonight\b',
+        r'\bmorning\b',
+        r'\bevening\b',
+        r'\bnoon\b',
+        r'\bmidnight\b',
+    ]
+    
+    has_time = any(re.search(p, message_lower) for p in time_indicators)
+    
+    if not has_time:
+        # All-day task: schedule for 8am tomorrow, will escalate through the day
+        from datetime import timedelta
+        now = datetime.now(IST)
+        tomorrow_8am = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+        
+        # Clean up task text
+        task = re.sub(r"^(remind\s+me\s+to|reminder[:\s]+)", "", message_lower).strip()
+        task = re.sub(r'\s+', ' ', task).strip()
+        
+        if task:
+            return {
+                "task": task,
+                "time": tomorrow_8am,
+                "is_recurring": False,
+                "is_allday": True,
+            }
+    
     # Parse the time string using IST
     parsed_time = dateparser.parse(
         time_str or "in 1 hour",
@@ -383,7 +419,7 @@ def parse_reminder(message_body):
     if parsed_time.tzinfo is None:
         parsed_time = parsed_time.replace(tzinfo=IST)
     
-    return {"task": task, "time": parsed_time, "is_recurring": False}
+    return {"task": task, "time": parsed_time, "is_recurring": False, "is_allday": False}
 
 
 @app.route("/whatsapp", methods=["POST"])
@@ -423,7 +459,10 @@ def whatsapp_webhook():
                 "For recurring tasks:\n"
                 "• exercise daily at 7am\n"
                 "• standup weekdays at 10am\n"
-                "• review weekly at 6pm\n\n"
+                "• review weekly at 6pm\n"
+                "• pay rent monthly at 10am\n\n"
+                "All-day reminders (no time = escalates through the day):\n"
+                "• remind me to submit report\n\n"
                 "Commands: list, help"
             )
             return str(response), 200, {'Content-Type': 'text/xml'}
@@ -458,6 +497,7 @@ def whatsapp_webhook():
         
         # Create the task
         is_recurring = parsed.get("is_recurring", False)
+        is_allday = parsed.get("is_allday", False)
         task_id = add_task(
             message=parsed["task"],
             phone=phone,
@@ -465,6 +505,7 @@ def whatsapp_webhook():
             is_recurring=is_recurring,
             recurrence_type=parsed.get("recurrence_type"),
             recurrence_time=parsed.get("recurrence_time"),
+            is_allday=is_allday,
         )
         
         if task_id is None:
@@ -481,6 +522,13 @@ def whatsapp_webhook():
                 response.message(
                     f"Got it! I'll remind you to '{parsed['task']}' {rec_type} starting {time_str}. "
                     "I'll track your streak!"
+                )
+            elif is_allday:
+                logger.info(f"Created all-day task {task_id}: '{parsed['task']}'")
+                response.message(
+                    f"Got it! I'll remind you to '{parsed['task']}' tomorrow. "
+                    "I'll SMS you in the morning, WhatsApp at noon, "
+                    "then call you in the evening if it's not done!"
                 )
             else:
                 logger.info(f"Created task {task_id}: '{parsed['task']}' for {time_str}")

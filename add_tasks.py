@@ -15,6 +15,13 @@ Usage:
     # Add a recurring weekly task
     python add_tasks.py weekly "Weekly review" +15551234567 "18:00"
     
+    # Add a recurring monthly task (day of month optional, defaults to today)
+    python add_tasks.py monthly "Pay rent" +15551234567 "10:00"
+    python add_tasks.py monthly "Pay rent" +15551234567 "10:00" 1  # 1st of each month
+    
+    # Add an all-day task (no specific time - escalates: SMS 8am -> WhatsApp 12pm -> Call 6pm)
+    python add_tasks.py allday "Submit report" +15551234567
+    
     # Add an allowed number
     python add_tasks.py allow +15551234567 "John"
     
@@ -37,12 +44,17 @@ def list_tasks():
         print("No pending tasks.")
         return
     
-    print(f"{'ID':<5} {'Message':<25} {'Phone':<15} {'Due':<20} {'Recur':<8} {'Streak':<6}")
-    print("-" * 85)
+    print(f"{'ID':<5} {'Message':<25} {'Phone':<15} {'Due':<20} {'Type':<10} {'Streak':<6}")
+    print("-" * 90)
     for t in tasks:
-        recur = t['recurrence_type'] or '-'
+        if t['is_allday']:
+            task_type = f"allday/{t['escalation_stage']}"
+        elif t['recurrence_type']:
+            task_type = t['recurrence_type']
+        else:
+            task_type = 'once'
         streak = t['streak'] or 0
-        print(f"{t['id']:<5} {t['message'][:23]:<25} {t['phone']:<15} {t['time'][:19]:<20} {recur:<8} {streak:<6}")
+        print(f"{t['id']:<5} {t['message'][:23]:<25} {t['phone']:<15} {t['time'][:19]:<20} {task_type:<10} {streak:<6}")
 
 def list_allowed():
     from db import cursor
@@ -59,7 +71,7 @@ def list_allowed():
         quiet = f"{n['quiet_start']}-{n['quiet_end']}"
         print(f"{n['phone']:<15} {(n['name'] or '-'):<20} {quiet:<15} {n['max_daily_calls']:<10}")
 
-def add_recurring_task(message, phone, time_str, recurrence_type):
+def add_recurring_task(message, phone, time_str, recurrence_type, recurrence_day=None):
     """Add a recurring task with first occurrence calculated."""
     hour, minute = map(int, time_str.split(":"))
     now = datetime.now(IST)
@@ -76,6 +88,21 @@ def add_recurring_task(message, phone, time_str, recurrence_type):
         while first_time.weekday() >= 5:  # 5=Sat, 6=Sun
             first_time += timedelta(days=1)
     
+    # For monthly, calculate first occurrence on the specified day
+    if recurrence_type == "monthly" and recurrence_day:
+        import calendar
+        year = first_time.year
+        month = first_time.month
+        # If the day has passed this month, go to next month
+        if first_time.day > recurrence_day or (first_time.day == recurrence_day and first_time <= now):
+            month += 1
+            if month > 12:
+                month = 1
+                year += 1
+        last_day = calendar.monthrange(year, month)[1]
+        day = min(recurrence_day, last_day)
+        first_time = datetime(year, month, day, hour, minute, 0, tzinfo=IST)
+    
     task_id = add_task(
         message=message,
         phone=phone,
@@ -83,12 +110,15 @@ def add_recurring_task(message, phone, time_str, recurrence_type):
         is_recurring=True,
         recurrence_type=recurrence_type,
         recurrence_time=time_str,
+        recurrence_day=recurrence_day,
     )
     
     if task_id:
         print(f"Added {recurrence_type} task {task_id}: '{message}' for {phone}")
         print(f"  First reminder: {first_time.strftime('%b %d at %I:%M %p')} IST")
         print(f"  Recurs: {recurrence_type} at {time_str} IST")
+        if recurrence_day:
+            print(f"  Day of month: {recurrence_day}")
     else:
         print("Failed to add task (might be duplicate)")
 
@@ -127,6 +157,35 @@ def main():
         phone = sys.argv[3]
         time_str = sys.argv[4]  # HH:MM format
         add_recurring_task(message, phone, time_str, "weekly")
+    
+    elif cmd == "monthly" and len(sys.argv) >= 5:
+        message = sys.argv[2]
+        phone = sys.argv[3]
+        time_str = sys.argv[4]  # HH:MM format
+        recurrence_day = int(sys.argv[5]) if len(sys.argv) > 5 else None
+        add_recurring_task(message, phone, time_str, "monthly", recurrence_day)
+    
+    elif cmd == "allday" and len(sys.argv) >= 4:
+        message = sys.argv[2]
+        phone = sys.argv[3]
+        
+        # All-day tasks start at 8 AM tomorrow
+        now = datetime.now(IST)
+        tomorrow_8am = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+        
+        task_id = add_task(
+            message=message,
+            phone=phone,
+            time=tomorrow_8am.isoformat(),
+            is_allday=True,
+        )
+        
+        if task_id:
+            print(f"Added all-day task {task_id}: '{message}' for {phone}")
+            print(f"  Starts: {tomorrow_8am.strftime('%b %d at %I:%M %p')} IST")
+            print(f"  Escalation: SMS (8am) -> WhatsApp (12pm) -> Call (6pm)")
+        else:
+            print("Failed to add task (might be duplicate)")
     
     elif cmd == "allow" and len(sys.argv) >= 3:
         phone = sys.argv[2]
