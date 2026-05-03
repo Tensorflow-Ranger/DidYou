@@ -439,12 +439,18 @@ def parse_reminder(message_body):
     
     # Non-recurring task parsing (existing logic)
     patterns = [
-        # "remind me to X on DATE at TIME" — specific date
+        # "remind me to X on DATE at TIME" — specific date with time
         r"remind(?:\s+me)?\s+to\s+(.+?)\s+on\s+(.+?\s+at\s+.+)",
-        # "X on DATE at TIME" — specific date without remind me
+        # "X on DATE at TIME" — specific date with time
         r"(.+?)\s+on\s+((?:the\s+)?\d{1,2}(?:st|nd|rd|th)?(?:\s+\w+)?\s+at\s+.+)",
         r"(.+?)\s+on\s+(\w+\s+\d{1,2}(?:st|nd|rd|th)?\s+at\s+.+)",
-        # "remind me to X at/in/on Y"
+        # "remind me to X on DATE" — specific date, no time (all-day)
+        r"remind(?:\s+me)?\s+to\s+(.+?)\s+on\s+((?:the\s+)?\d{1,2}(?:st|nd|rd|th)?(?:\s+of\s+\w+|\s+\w+)?)\s*$",
+        r"remind(?:\s+me)?\s+to\s+(.+?)\s+on\s+(\w+\s+\d{1,2}(?:st|nd|rd|th)?)\s*$",
+        # "X on DATE" — specific date, no time (all-day)
+        r"(.+?)\s+on\s+((?:the\s+)?\d{1,2}(?:st|nd|rd|th)?(?:\s+of\s+\w+|\s+\w+)?)\s*$",
+        r"(.+?)\s+on\s+(\w+\s+\d{1,2}(?:st|nd|rd|th)?)\s*$",
+        # "remind me to X at/in/by Y"
         r"remind(?:\s+me)?\s+to\s+(.+?)\s+(at|in|by|tomorrow|next\s+\w+)\s*(.+)?",
         # "X at/in Y" (simpler)
         r"(.+?)\s+(at|in)\s+(.+)",
@@ -482,37 +488,66 @@ def parse_reminder(message_body):
     if not task:
         return None
     
-    # Check if this is an all-day task (no time specified)
-    # All-day if no time-like patterns found in original message
-    time_indicators = [
-        r'\bat\s+\d',          # "at 3pm", "at 15:00"
-        r'\bin\s+\d+\s+\w+',   # "in 30 minutes"
-        r'\b\d{1,2}:\d{2}',    # "15:00", "3:30"
-        r'\b\d{1,2}\s*(?:am|pm)\b',  # "3pm", "3 pm"
-        r'\btomorrow\b',       # implies a specific time context
-        r'\btonight\b',
+    # Check if this is an all-day task (no time-of-day specified)
+    time_of_day_indicators = [
+        r'\bat\s+\d',              # "at 3pm", "at 15:00"
+        r'\bin\s+\d+\s+\w+',       # "in 30 minutes"
+        r'\b\d{1,2}:\d{2}',        # "15:00", "3:30"
+        r'\b\d{1,2}\s*(?:am|pm)\b',# "3pm", "3 pm"
         r'\bmorning\b',
         r'\bevening\b',
         r'\bnoon\b',
         r'\bmidnight\b',
+        r'\btonight\b',
     ]
     
-    has_time = any(re.search(p, message_lower) for p in time_indicators)
+    has_time_of_day = any(re.search(p, message_lower) for p in time_of_day_indicators)
     
-    if not has_time:
-        # All-day task: schedule for 8am tomorrow, will escalate through the day
+    # Check if there's a specific date
+    date_indicators = [
+        r'\bon\s+(?:the\s+)?\d{1,2}(?:st|nd|rd|th)?',  # "on 15th", "on the 25th"
+        r'\bon\s+\w+\s+\d{1,2}',                        # "on May 15"
+        r'\btomorrow\b',
+    ]
+    has_specific_date = any(re.search(p, message_lower) for p in date_indicators)
+    
+    if not has_time_of_day:
+        # All-day task
         from datetime import timedelta
         now = datetime.now(IST)
-        tomorrow_8am = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
         
-        # Clean up task text
-        task = re.sub(r"^(remind\s+me\s+to|reminder[:\s]+)", "", message_lower).strip()
-        task = re.sub(r'\s+', ' ', task).strip()
+        if has_specific_date and time_str:
+            # Parse the date, set time to 8am for escalation start
+            parsed_date = dateparser.parse(
+                time_str,
+                settings={
+                    'PREFER_DATES_FROM': 'future',
+                    'RETURN_AS_TIMEZONE_AWARE': True,
+                    'TIMEZONE': DEFAULT_TIMEZONE,
+                }
+            )
+            if parsed_date:
+                # Set to 8am on that date
+                first_time = parsed_date.replace(hour=8, minute=0, second=0, microsecond=0)
+                if first_time.tzinfo is None:
+                    first_time = first_time.replace(tzinfo=IST)
+            else:
+                first_time = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
+        else:
+            # No specific date — tomorrow 8am
+            first_time = (now + timedelta(days=1)).replace(hour=8, minute=0, second=0, microsecond=0)
         
-        if task:
+        # Clean up task text — remove date parts
+        clean_task = task
+        clean_task = re.sub(r'\s+on\s+(?:the\s+)?\d{1,2}(?:st|nd|rd|th)?(?:\s+of\s+\w+|\s+\w+)?', '', clean_task)
+        clean_task = re.sub(r'\s+on\s+\w+\s+\d{1,2}(?:st|nd|rd|th)?', '', clean_task)
+        clean_task = re.sub(r'\s+tomorrow', '', clean_task)
+        clean_task = re.sub(r'\s+', ' ', clean_task).strip()
+        
+        if clean_task:
             return {
-                "task": task,
-                "time": tomorrow_8am,
+                "task": clean_task,
+                "time": first_time,
                 "is_recurring": False,
                 "is_allday": True,
             }
@@ -572,30 +607,26 @@ def whatsapp_webhook():
                 "*DidYou Reminder Bot*\n\n"
                 
                 "*One-time reminders:*\n"
-                "• _remind me to drink water at 3pm_\n"
+                "• _drink water at 3pm_\n"
                 "• _call mom tomorrow at 9am_\n"
-                "• _buy groceries in 30 minutes_\n"
-                "• _pay rent on May 15th at 10am_\n"
-                "• _doctor on the 25th at 2pm_\n\n"
+                "• _pay rent on May 15th at 10am_\n\n"
                 
-                "*Recurring reminders:*\n"
+                "*All-day (no time = escalates):*\n"
+                "SMS 8am → WhatsApp noon → calls 6pm\n"
+                "• _submit report_\n"
+                "• _pay rent on May 15th_\n"
+                "• _clean on the 25th_\n\n"
+                
+                "*Recurring:*\n"
                 "• _exercise daily at 7am_\n"
                 "• _standup weekdays at 10am_\n"
-                "• _review weekly at 6pm_\n"
-                "• _pay rent monthly at 10am_\n"
-                "• _pay rent monthly on 1st at 10am_\n\n"
-                
-                "*All-day reminders:*\n"
-                "No time = SMS 8am, WhatsApp noon, calls 6pm\n"
-                "• _submit report_\n"
-                "• _exercise daily_\n"
-                "• _pay rent monthly on 1st_\n\n"
+                "• _pay rent monthly on 1st at 10am_\n"
+                "• _pay rent monthly on 1st_ (all-day)\n\n"
                 
                 "*Commands:*\n"
                 "• *list* — see pending tasks\n"
                 "• *clear 123* — clear by ID\n"
-                "• *clear all* — clear all tasks\n"
-                "• *help* — show this"
+                "• *clear all* — clear all tasks"
             )
             return str(response), 200, {'Content-Type': 'text/xml'}
         
