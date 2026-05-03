@@ -73,35 +73,40 @@ def list_allowed():
 
 def add_recurring_task(message, phone, time_str, recurrence_type, recurrence_day=None):
     """Add a recurring task with first occurrence calculated."""
+    import calendar
+    
     hour, minute = map(int, time_str.split(":"))
     now = datetime.now(IST)
     
     # Calculate first occurrence
     first_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     
-    # If time has passed today, start tomorrow (or next valid day)
-    if first_time <= now:
-        first_time += timedelta(days=1)
-    
-    # For weekdays, skip to Monday if first day is weekend
-    if recurrence_type == "weekdays":
-        while first_time.weekday() >= 5:  # 5=Sat, 6=Sun
-            first_time += timedelta(days=1)
-    
-    # For monthly, calculate first occurrence on the specified day
-    if recurrence_type == "monthly" and recurrence_day:
-        import calendar
-        year = first_time.year
-        month = first_time.month
-        # If the day has passed this month, go to next month
-        if first_time.day > recurrence_day or (first_time.day == recurrence_day and first_time <= now):
-            month += 1
+    if recurrence_type == "monthly":
+        # Default recurrence_day to today's day if not specified
+        if recurrence_day is None:
+            recurrence_day = now.day
+        
+        # If the time already passed this month for that day, go to next month
+        target_this_month = now.replace(day=min(recurrence_day, calendar.monthrange(now.year, now.month)[1]),
+                                        hour=hour, minute=minute, second=0, microsecond=0)
+        if target_this_month > now:
+            first_time = target_this_month
+        else:
+            year = now.year
+            month = now.month + 1
             if month > 12:
                 month = 1
                 year += 1
-        last_day = calendar.monthrange(year, month)[1]
-        day = min(recurrence_day, last_day)
-        first_time = datetime(year, month, day, hour, minute, 0, tzinfo=IST)
+            day = min(recurrence_day, calendar.monthrange(year, month)[1])
+            first_time = datetime(year, month, day, hour, minute, 0, tzinfo=IST)
+    else:
+        # Daily, weekdays, weekly
+        if first_time <= now:
+            first_time += timedelta(days=1)
+        
+        if recurrence_type == "weekdays":
+            while first_time.weekday() >= 5:
+                first_time += timedelta(days=1)
     
     task_id = add_task(
         message=message,

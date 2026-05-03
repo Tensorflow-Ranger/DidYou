@@ -279,7 +279,7 @@ def parse_reminder(message_body):
         (r'\b(daily|every\s*day)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'daily'),
         (r'\b(weekdays|every\s*weekday|mon(?:day)?[\s-]*fri(?:day)?)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'weekdays'),
         (r'\b(weekly|every\s*week)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'weekly'),
-        (r'\b(monthly|every\s*month)\b.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'monthly'),
+        (r'\b(monthly|every\s*month)\b(?:.*?\bon\s+(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?)?.*?\bat\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?)', 'monthly'),
     ]
     
     for pattern, rec_type in recurring_patterns:
@@ -287,7 +287,14 @@ def parse_reminder(message_body):
         if match:
             is_recurring = True
             recurrence_type = rec_type
-            time_str = match.group(2)
+            
+            # Monthly has an extra group for day-of-month
+            if recurrence_type == "monthly":
+                day_str = match.group(2)  # optional day like "1", "15"
+                time_str = match.group(3)
+            else:
+                day_str = None
+                time_str = match.group(2)
             
             # Parse the time to get HH:MM format
             parsed = dateparser.parse(
@@ -303,19 +310,55 @@ def parse_reminder(message_body):
             task = re.sub(r'\s+', ' ', task).strip()  # Clean up whitespace
             
             if task:
-                # For recurring tasks, first occurrence is today (if time hasn't passed) or tomorrow
+                from datetime import timedelta
+                import calendar
+                
                 now = datetime.now(IST)
-                if parsed and parsed > now:
+                if recurrence_time:
+                    hour, minute = map(int, recurrence_time.split(":"))
+                else:
+                    hour, minute = 9, 0  # Default to 9 AM
+                
+                # For monthly, determine the target day
+                if recurrence_type == "monthly":
+                    recurrence_day = int(day_str) if day_str else now.day
+                else:
+                    recurrence_day = None
+                
+                if parsed and parsed > now and recurrence_type != "monthly":
                     first_time = parsed
                 else:
-                    # Schedule for tomorrow
-                    from datetime import timedelta
-                    tomorrow = now + timedelta(days=1)
-                    if recurrence_time:
-                        hour, minute = map(int, recurrence_time.split(":"))
+                    # Calculate next valid occurrence
+                    if recurrence_type == "monthly":
+                        # Target the specified day this month or next
+                        year = now.year
+                        month = now.month
+                        last_day = calendar.monthrange(year, month)[1]
+                        target_day = min(recurrence_day or now.day, last_day)
+                        target = datetime(year, month, target_day, hour, minute, 0, tzinfo=IST)
+                        if target <= now:
+                            month += 1
+                            if month > 12:
+                                month = 1
+                                year += 1
+                            target_day = min(recurrence_day or now.day, calendar.monthrange(year, month)[1])
+                            target = datetime(year, month, target_day, hour, minute, 0, tzinfo=IST)
+                        first_time = target
+                    elif recurrence_type == "weekly":
+                        first_time = (now + timedelta(days=7)).replace(
+                            hour=hour, minute=minute, second=0, microsecond=0
+                        )
+                    elif recurrence_type == "weekdays":
+                        first_time = (now + timedelta(days=1)).replace(
+                            hour=hour, minute=minute, second=0, microsecond=0
+                        )
+                        while first_time.weekday() >= 5:
+                            first_time += timedelta(days=1)
                     else:
-                        hour, minute = 9, 0  # Default to 9 AM
-                    first_time = tomorrow.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                        # daily
+                        first_time = (now + timedelta(days=1)).replace(
+                            hour=hour, minute=minute, second=0, microsecond=0
+                        )
                 
                 return {
                     "task": task,
@@ -323,6 +366,7 @@ def parse_reminder(message_body):
                     "is_recurring": True,
                     "recurrence_type": recurrence_type,
                     "recurrence_time": recurrence_time,
+                    "recurrence_day": recurrence_day,
                 }
     
     # Non-recurring task parsing (existing logic)
@@ -460,7 +504,8 @@ def whatsapp_webhook():
                 "• exercise daily at 7am\n"
                 "• standup weekdays at 10am\n"
                 "• review weekly at 6pm\n"
-                "• pay rent monthly at 10am\n\n"
+                "• pay rent monthly at 10am\n"
+                "• pay rent monthly on 1st at 10am\n\n"
                 "All-day reminders (no time = escalates through the day):\n"
                 "• remind me to submit report\n\n"
                 "Commands: list, help"
@@ -505,6 +550,7 @@ def whatsapp_webhook():
             is_recurring=is_recurring,
             recurrence_type=parsed.get("recurrence_type"),
             recurrence_time=parsed.get("recurrence_time"),
+            recurrence_day=parsed.get("recurrence_day"),
             is_allday=is_allday,
         )
         
