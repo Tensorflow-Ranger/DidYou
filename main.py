@@ -1,18 +1,17 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-# Import scheduler (starts automatically on import)
-from scheduler import scheduler
-from db import add_allowed_number
-import time
 import sys
+from scheduler import scheduler
+from server import app
+from db import add_allowed_number
+
 
 def main():
     print("DidYou Task Reminder Service Starting...")
     print(f"Scheduler running: {scheduler.running}")
-    
-    # Add some seed allowed numbers if passed as arguments
-    # Usage: python main.py +15551234567 +15559876543
+
+    # Seed allowed numbers from CLI args
     if len(sys.argv) > 1:
         for phone in sys.argv[1:]:
             if phone.startswith("+"):
@@ -20,21 +19,10 @@ def main():
                     print(f"Added {phone} to allowed numbers")
                 else:
                     print(f"{phone} already in allowed numbers")
-    
-    print("\nTo add allowed numbers, run:")
-    print("  python main.py +15551234567")
-    print("\nOr use Python:")
-    print("  from db import add_allowed_number")
-    print("  add_allowed_number('+15551234567', name='John')")
-    
-    print("\nService running. Press Ctrl+C to stop.")
-    
-    try:
-        while True:
-            time.sleep(10)
-    except KeyboardInterrupt:
-        print("\nShutting down...")
-        scheduler.shutdown()
+
+    print("\nStarting Flask server on port 5000...")
+    app.run(host="0.0.0.0", port=5000)
+
 
 if __name__ == "__main__":
     main()
