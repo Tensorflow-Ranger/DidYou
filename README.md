@@ -32,6 +32,8 @@ Regular reminders are easy to ignore. A notification pops up, you swipe it away,
 ```bash
 git clone <repo>
 cd DidYou
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
 # Edit .env with your Twilio credentials
@@ -56,10 +58,57 @@ Set these webhooks in your Twilio console:
 | Voice | `http://your-domain:5000/voice` |
 | WhatsApp | `http://your-domain:5000/whatsapp` |
 
-### Run
+### Run (Development)
 
 ```bash
+source venv/bin/activate
 python main.py
+```
+
+This starts both the Flask server (port 5000) and the APScheduler.
+
+### Run (Production with systemd)
+
+Create a systemd service for auto-start on boot:
+
+```bash
+sudo nano /etc/systemd/system/didyou.service
+```
+
+Paste this (adjust paths if needed):
+
+```ini
+[Unit]
+Description=DidYou Reminder Service
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/DidYou
+ExecStart=/home/ubuntu/DidYou/venv/bin/python main.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable didyou    # Auto-start on boot
+sudo systemctl start didyou
+```
+
+**Useful commands:**
+```bash
+sudo systemctl status didyou      # Check status
+sudo systemctl restart didyou     # Restart after code changes
+sudo journalctl -u didyou -f      # View logs (live)
+sudo journalctl -u didyou -n 50   # Last 50 log lines
 ```
 
 ## Usage
@@ -105,7 +154,9 @@ submit report              # all-day task (no time = escalation)
 
 **Commands:**
 - `help` — Show usage examples
-- `list` — Show your pending tasks
+- `list` — Show your pending tasks with IDs
+- `clear 123` — Clear a specific task by ID
+- `clear all` — Clear all your pending tasks
 - `DONE` — Mark task complete (in response to reminder)
 
 ### Query Parsing Rules
@@ -117,6 +168,13 @@ daily exercise at 7am       ✓
 remind me daily at 7am to exercise  ✓
 ```
 Keywords: `daily`, `every day`, `weekdays`, `weekly`, `every week`, `monthly`, `every month`
+
+**Recurring all-day tasks** — frequency keyword without time:
+```
+pay rent monthly on 1st        ✓ (escalates on the 1st each month)
+exercise daily                 ✓ (escalates every day)
+clean weekly                   ✓ (escalates every week)
+```
 
 **One-time tasks** — task must come before time:
 ```
@@ -169,7 +227,7 @@ Per-user settings in `allowed_numbers` table:
 ## Files
 
 ```
-main.py          # Entry point, starts scheduler
+main.py          # Entry point, starts Flask server + scheduler
 server.py        # Flask app with Twilio webhooks
 scheduler.py     # APScheduler job that checks tasks
 caller.py        # Twilio API calls (voice, SMS, WhatsApp)
