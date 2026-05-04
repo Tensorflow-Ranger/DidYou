@@ -22,10 +22,9 @@ Regular reminders are easy to ignore. A notification pops up, you swipe it away,
 ### Requirements
 
 - Python 3.9+
-- Twilio account with:
-  - Phone number (for calls/SMS)
-  - WhatsApp sender (sandbox or approved number)
-- Public URL for webhooks (ngrok, EC2 with Elastic IP, etc.)
+- Twilio account with a phone number (for voice calls and SMS)
+- GREEN-API account (free tier, for WhatsApp messaging)
+- Public URL for Twilio webhooks (ngrok, EC2 with Elastic IP, etc.)
 
 ### Installation
 
@@ -36,27 +35,44 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env with your Twilio credentials
+# Edit .env with your credentials
 ```
 
 ### Environment Variables
 
 ```bash
+# Twilio — voice calls and SMS
 TWILIO_SID=ACxxxxx              # Account SID (starts with AC)
 TWILIO_AUTH_TOKEN=xxxxx         # 32-char auth token
 TWILIO_PHONE=+15551234567       # Your Twilio number (E.164)
-TWILIO_WHATSAPP=whatsapp:+15551234567  # Optional, defaults to TWILIO_PHONE
-BASE_URL=http://your-domain:5000       # Your public URL (HTTP works for voice)
+
+# GREEN-API — WhatsApp messaging (free for up to 3 contacts)
+GREEN_API_ID=1101000001         # Instance ID from console.green-api.com
+GREEN_API_TOKEN=d75b3a66...     # API token from console.green-api.com
+
+# Server
+BASE_URL=http://your-domain:5000  # Public URL for Twilio webhooks
 ```
 
 ### Twilio Webhook Configuration
 
-Set these webhooks in your Twilio console:
+Set this webhook in your Twilio console (for voice calls only):
 
 | Channel | Webhook URL |
 |---------|-------------|
 | Voice | `http://your-domain:5000/voice` |
-| WhatsApp | `http://your-domain:5000/whatsapp` |
+
+WhatsApp is handled by GREEN-API polling — no webhook needed.
+
+### GREEN-API Setup
+
+1. Sign up at [console.green-api.com](https://console.green-api.com)
+2. Create an instance (choose the free Developer plan)
+3. Open WhatsApp on your phone → Linked Devices → Link a Device
+4. Scan the QR code shown in the GREEN-API console
+5. Copy the `idInstance` and `apiTokenInstance` into your `.env` file
+
+**Free tier limits:** 3 contacts, unlimited messages. Perfect for family use.
 
 ### Run (Development)
 
@@ -65,7 +81,7 @@ source venv/bin/activate
 python main.py
 ```
 
-This starts both the Flask server (port 5000) and the APScheduler.
+This starts the Flask server (port 5000), the APScheduler, and the GREEN-API WhatsApp poller.
 
 ### Run (Production with systemd)
 
@@ -139,17 +155,18 @@ python add_tasks.py allowed
 
 ### WhatsApp — Natural Language
 
-Send messages to your Twilio WhatsApp number:
+Send messages to your linked WhatsApp number:
 
 ```
 remind me to drink water at 3pm
 call mom tomorrow at 9am
-buy groceries in 30 minutes
+pay rent on May 15th at 10am
 exercise daily at 7am
 standup weekdays at 10am
-review weekly at 6pm
-pay rent monthly at 10am
-submit report              # all-day task (no time = escalation)
+pay rent monthly on 1st at 10am
+submit report                  # all-day (no time = escalation)
+pay rent on May 15th           # all-day on specific date
+pay rent monthly on 1st        # recurring all-day
 ```
 
 **Commands:**
@@ -174,6 +191,13 @@ Keywords: `daily`, `every day`, `weekdays`, `weekly`, `every week`, `monthly`, `
 pay rent monthly on 1st        ✓ (escalates on the 1st each month)
 exercise daily                 ✓ (escalates every day)
 clean weekly                   ✓ (escalates every week)
+```
+
+**One-time tasks on specific dates:**
+```
+pay rent on May 15th at 10am   ✓
+doctor on the 25th at 2pm      ✓
+pay rent on June 10th          ✓ (all-day on that date)
 ```
 
 **One-time tasks** — task must come before time:
@@ -227,13 +251,14 @@ Per-user settings in `allowed_numbers` table:
 ## Files
 
 ```
-main.py          # Entry point, starts Flask server + scheduler
-server.py        # Flask app with Twilio webhooks
-scheduler.py     # APScheduler job that checks tasks
-caller.py        # Twilio API calls (voice, SMS, WhatsApp)
-db.py            # SQLite schema and queries
-add_tasks.py     # CLI for task management
-tasks.db         # SQLite database (created on first run)
+main.py               # Entry point — starts Flask, scheduler, and WhatsApp poller
+server.py             # Flask app with Twilio voice/SMS webhooks + parse_reminder()
+scheduler.py          # APScheduler — checks tasks, handles escalation
+caller.py             # Twilio (voice/SMS) + GREEN-API (WhatsApp) sending
+whatsapp_receiver.py  # GREEN-API polling loop for incoming WhatsApp messages
+db.py                 # SQLite schema and queries
+add_tasks.py          # CLI for task management
+tasks.db              # SQLite database (created on first run)
 ```
 
 ## License

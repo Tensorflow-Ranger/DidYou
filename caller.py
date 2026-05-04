@@ -1,17 +1,33 @@
 from twilio.rest import Client
 from dotenv import load_dotenv
+import requests
+import logging
 import os
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
+# Twilio — for voice calls and SMS
 client = Client(
     os.getenv("TWILIO_SID"),
     os.getenv("TWILIO_AUTH_TOKEN")
 )
 
 TWILIO_PHONE = os.getenv("TWILIO_PHONE")
-TWILIO_WHATSAPP = os.getenv("TWILIO_WHATSAPP", f"whatsapp:{TWILIO_PHONE}")
 BASE_URL = os.getenv("BASE_URL")
+
+# GREEN-API — for WhatsApp
+GREEN_API_ID = os.getenv("GREEN_API_ID")
+GREEN_API_TOKEN = os.getenv("GREEN_API_TOKEN")
+GREEN_API_URL = f"https://api.greenapi.com/waInstance{GREEN_API_ID}"
+
+
+def phone_to_chat_id(phone):
+    """Convert E.164 phone number to GREEN-API chat ID format."""
+    # Strip +, whatsapp: prefix, spaces
+    phone = phone.replace("whatsapp:", "").replace("+", "").replace(" ", "").strip()
+    return f"{phone}@c.us"
 
 
 def make_call(phone, task_id, task_message=None):
@@ -34,13 +50,13 @@ def make_call(phone, task_id, task_message=None):
         )
         return call.sid
     except Exception as e:
-        print(f"Error making call to {phone}: {e}")
+        logger.error(f"Error making call to {phone}: {e}")
         return None
 
 
 def send_sms(phone, message):
     """
-    Send an SMS message.
+    Send an SMS message via Twilio.
     Returns the message SID or None on error.
     """
     try:
@@ -52,28 +68,28 @@ def send_sms(phone, message):
         )
         return msg.sid
     except Exception as e:
-        print(f"Error sending SMS to {phone}: {e}")
+        logger.error(f"Error sending SMS to {phone}: {e}")
         return None
 
 
 def send_whatsapp(phone, message):
     """
-    Send a WhatsApp message.
-    Note: Outbound WhatsApp outside 24h session requires pre-approved templates.
-    Returns the message SID or None on error.
+    Send a WhatsApp message via GREEN-API.
+    Returns the message ID or None on error.
     """
-    # Ensure proper format
-    if not phone.startswith("whatsapp:"):
-        phone = f"whatsapp:{phone}"
+    chat_id = phone_to_chat_id(phone)
     
     try:
-        msg = client.messages.create(
-            to=phone,
-            from_=TWILIO_WHATSAPP,
-            body=message,
-            status_callback=f"{BASE_URL}/message-status",
+        resp = requests.post(
+            f"{GREEN_API_URL}/sendMessage/{GREEN_API_TOKEN}",
+            json={"chatId": chat_id, "message": message},
+            timeout=10,
         )
-        return msg.sid
+        resp.raise_for_status()
+        data = resp.json()
+        msg_id = data.get("idMessage")
+        logger.info(f"WhatsApp sent to {chat_id}: {msg_id}")
+        return msg_id
     except Exception as e:
-        print(f"Error sending WhatsApp to {phone}: {e}")
+        logger.error(f"Error sending WhatsApp to {chat_id}: {e}")
         return None
