@@ -132,6 +132,7 @@ def check_tasks(registry: PluginRegistry, config: Config) -> None:
             channel = "telegram"
 
         reminder_msg = f"Reminder: {message}. Reply DONE when completed."
+        logger.info(f"Task {task_id}: sending via {channel} to {target[:6]}...")
         success = registry.send(channel, target, reminder_msg, task_id=task_id, call=(channel == "call"))
 
         if success:
@@ -141,7 +142,14 @@ def check_tasks(registry: PluginRegistry, config: Config) -> None:
             new_time = now + timedelta(minutes=next_interval)
             update_task_time(task_id, new_time)
         else:
-            new_time = now + timedelta(minutes=1)
+            # Call failed — fall back to Telegram immediately
+            if channel == "call":
+                fallback = registry.send("telegram", user_id, reminder_msg)
+                if fallback:
+                    log_call(task_id, user_id, "telegram", "fallback_from_call")
+            new_attempts = increment_task_attempts(task_id)
+            next_interval = get_next_interval(new_attempts)
+            new_time = now + timedelta(minutes=next_interval)
             update_task_time(task_id, new_time)
 
 
