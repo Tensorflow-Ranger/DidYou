@@ -132,7 +132,7 @@ def check_tasks(registry: PluginRegistry, config: Config) -> None:
             target = user_id
             channel = "telegram"
 
-        reminder_msg = f"Reminder: {message}. Reply DONE when completed."
+        reminder_msg = f"Reminder: {message}.\nReply /done {task_id} when completed."
         logger.info(f"Task {task_id}: sending via {channel} to {target[:6]}...")
         success = registry.send(channel, target, reminder_msg, task_id=task_id, call=(channel == "call"))
 
@@ -203,12 +203,12 @@ def handle_allday_escalation(task, registry: PluginRegistry, config: Config, now
             return
         if channel == "call":
             # Fall back to telegram
-            reminder_msg = f"Reminder: {message}. Reply DONE when completed."
+            reminder_msg = f"Reminder: {message}.\nReply /done {task_id} when completed."
             registry.send("telegram", user_id, reminder_msg)
             return
 
     # Dispatch
-    reminder_msg = f"Reminder: {message}. Reply DONE when completed."
+    reminder_msg = f"Reminder: {message}.\nReply /done {task_id} when completed."
     if channel in phone_channels:
         target = user["phone"]
     else:

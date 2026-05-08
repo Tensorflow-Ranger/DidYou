@@ -170,4 +170,5 @@ class TwilioCallPlugin(PlatformPlugin):
 
     def send_message(self, target: str, message: str, **kwargs) -> Optional[str]:
         """Route to Twilio plugin with call=True."""
+        kwargs.pop("call", None)  # Remove if passed by scheduler to avoid duplicate
         return self._twilio.send_message(target, message, call=True, **kwargs)

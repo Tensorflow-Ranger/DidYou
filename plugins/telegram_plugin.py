@@ -274,7 +274,7 @@ class TelegramPlugin(PlatformPlugin):
                 self.send_message(chat_id, f"Task {task_id} not found or doesn't belong to you.")
             return
 
-        # /done N
+        # /done N or just "done" (completes most recent task if only one)
         done_match = re.match(r'^/?(done|complete)\s+(\d+)$', text_lower)
         if done_match:
             task_id = int(done_match.group(2))
@@ -286,6 +286,26 @@ class TelegramPlugin(PlatformPlugin):
                 )
             else:
                 self.send_message(chat_id, f"Task {task_id} marked done!")
+            return
+
+        if text_lower in ("done", "/done", "complete"):
+            tasks = get_user_tasks(chat_id)
+            if len(tasks) == 1:
+                task_id = tasks[0]["id"]
+                is_recurring, next_time, streak = complete_task(task_id)
+                if is_recurring:
+                    self.send_message(chat_id,
+                        f"Task {task_id} completed! Streak: {streak}\nNext: {next_time}"
+                    )
+                else:
+                    self.send_message(chat_id, f"Task {task_id} marked done!")
+            elif len(tasks) == 0:
+                self.send_message(chat_id, "No pending tasks.")
+            else:
+                task_list = "\n".join([f"- [{t['id']}] {t['message']}" for t in tasks[:10]])
+                self.send_message(chat_id,
+                    f"Which task? Reply /done N\n\n{task_list}"
+                )
             return
 
         # Natural language task creation
