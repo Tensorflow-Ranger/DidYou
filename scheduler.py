@@ -104,6 +104,7 @@ def check_tasks(registry: PluginRegistry, config: Config) -> None:
             continue
 
         user = get_user(user_id)
+        logger.debug(f"Task {task_id}: user_id={user_id}, user_found={user is not None}, phone={user['phone'] if user else 'N/A'}")
 
         # Check quiet hours (needs phone for call/sms)
         if user and user["phone"] and is_quiet_hours(user):
