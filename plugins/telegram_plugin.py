@@ -83,6 +83,12 @@ class TelegramPlugin(PlatformPlugin):
                 "text": message,
                 "parse_mode": "Markdown",
             }, timeout=10)
+            # Retry without parse_mode if Markdown causes 400
+            if resp.status_code == 400:
+                resp = requests.post(url, json={
+                    "chat_id": target,
+                    "text": message,
+                }, timeout=10)
             if resp.status_code == 200:
                 data = resp.json()
                 return str(data.get("result", {}).get("message_id", ""))
@@ -230,7 +236,7 @@ class TelegramPlugin(PlatformPlugin):
                 )
                 return
             update_user_phone(chat_id, phone)
-            self.send_message(chat_id, f"Phone saved: ***{phone[-4:]}. SMS/call escalation now available.")
+            self.send_message(chat_id, f"Phone saved (ending {phone[-4:]}). SMS/call escalation now available.")
             return
 
         # /list
